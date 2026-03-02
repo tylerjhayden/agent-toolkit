@@ -21,7 +21,7 @@ Curated Claude Code skills and CLI tools — ready to drop into any project.
 
 | Tool | Description | Platform | Version |
 |------|-------------|----------|---------|
-| [claude-usage](tools/claude-usage/) | > Fetches real-time claude.ai session and weekly usage limits using headless Playwright to bypass Cloudflare TLS fingerprinting, then displays progress bars per model tier. Includes a background poller that keeps a cache file fresh for statusline integration. | macOS | 1.0.2 |
+| [claude-usage](tools/claude-usage/) | Fetches real-time claude.ai session and weekly usage limits using headless Playwright to bypass Cloudflare TLS fingerprinting, then displays progress bars per model tier. Includes a background poller that keeps a cache file fresh for the statusline. | macOS | 1.1.0 |
 
 ## Installation
 

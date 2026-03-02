@@ -24,11 +24,7 @@ BUN="${HOME}/.bun/bin/bun"
 CACHE="$PROJECT_HOME/runtime/claude-usage/cache.json"
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >> "$LOG"; }
-# NOTE: Before installing, customize these variables for your project:
-#   - PROJECT_HOME (line 20): your project root directory
-#   - SCRIPT (line 21): path to claude-usage.ts
-#   - LOG (line 22): log file path
-#   - Replace 'com.myproject' in your LaunchAgent plist with your reverse-domain identifier
+# NOTE: Replace 'my-project' and 'com.myproject' with your own project name throughout this file.
 
 # Gate 1: Skip if no active Claude Code session
 if ! pgrep -xq "claude" 2>/dev/null; then
@@ -56,8 +52,20 @@ if [ -f "$CACHE" ]; then
       [ "$reset_epoch" -le "$now_epoch" ] && session_reset=true
     fi
 
-    if [ "$session_reset" = "false" ]; then
-      # Gate 2b: Age-based throttle (only when no reset pending)
+    # Gate 2c: Error backoff — if cache is stale (transient error), enforce 10-min minimum
+    # Uses last_error_at (fresh on each failure) instead of fetched_at (preserved from last success)
+    cache_stale=$(jq -r '.stale // false' "$CACHE" 2>/dev/null)
+    if [ "$cache_stale" = "true" ]; then
+      last_error_at=$(jq -r '.last_error_at // empty' "$CACHE" 2>/dev/null)
+      if [ -n "$last_error_at" ]; then
+        error_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "${last_error_at%%.*}" +%s 2>/dev/null || echo 0)
+        error_age=$(( now_epoch - error_epoch ))
+        [ "$error_age" -lt 600 ] && FETCH_NEEDED=false
+      fi
+    fi
+
+    if [ "$session_reset" = "false" ] && [ "$FETCH_NEEDED" = "true" ]; then
+      # Gate 2b: Age-based throttle (only when no reset pending and not already gated)
       if [ "$utilization_int" -ge 80 ]; then
         # High usage: only fetch if cache older than 2 minutes
         [ "$age_sec" -lt 120 ] && FETCH_NEEDED=false

@@ -13,22 +13,24 @@
  * Usage: claude-usage [--json] [--cache]
  */
 
-import { chromium } from 'playwright';
-import { execSync, execFileSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
-  statSync,
   mkdirSync,
-  writeFileSync,
+  readFileSync,
   renameSync,
   rmSync,
-  chmodSync,
+  statSync,
+  writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
+import { chromium } from 'playwright';
+import { buildHelp, die, outputJson, parse, resolveProjectHome } from '../cli.ts';
 
 // ─── Runtime paths ────────────────────────────────────────────────────────────
 
-const PROJECT_HOME = process.env.PROJECT_HOME ?? join(process.env.HOME!, 'my-project');
+const PROJECT_HOME = resolveProjectHome();
 const RUNTIME_DIR = join(PROJECT_HOME, 'runtime', 'claude-usage');
 const STORAGE_STATE_PATH = join(RUNTIME_DIR, 'browser-state.json');
 const CACHE_PATH = join(RUNTIME_DIR, 'cache.json');
@@ -92,6 +94,9 @@ function writeCache(data: UsageResponse): void {
     seven_day: data.seven_day ?? null,
     seven_day_sonnet: data.seven_day_sonnet ?? null,
     error: null,
+    stale: false,
+    last_error: null,
+    last_error_at: null,
   };
   const tmp = `${CACHE_PATH}.tmp`;
   writeFileSync(tmp, JSON.stringify(payload, null, 2));
@@ -100,6 +105,36 @@ function writeCache(data: UsageResponse): void {
 
 function writeCacheError(error: string): void {
   mkdirSync(RUNTIME_DIR, { recursive: true });
+
+  const isTransient = error === 'fetch_error';
+
+  // On transient errors, preserve last known-good cache data
+  if (isTransient && existsSync(CACHE_PATH)) {
+    try {
+      const existing = JSON.parse(readFileSync(CACHE_PATH, 'utf8'));
+      // Only preserve if existing cache has actual usage data (not a previous bare error)
+      if (existing.five_hour || existing.seven_day) {
+        const payload = {
+          fetched_at: existing.fetched_at,
+          five_hour: existing.five_hour ?? null,
+          seven_day: existing.seven_day ?? null,
+          seven_day_sonnet: existing.seven_day_sonnet ?? null,
+          error: null,
+          stale: true,
+          last_error: error,
+          last_error_at: new Date().toISOString(),
+        };
+        const tmp = `${CACHE_PATH}.tmp`;
+        writeFileSync(tmp, JSON.stringify(payload, null, 2));
+        renameSync(tmp, CACHE_PATH);
+        return;
+      }
+    } catch {
+      // Existing cache unreadable — fall through to full overwrite
+    }
+  }
+
+  // Credential errors or no prior good data — full overwrite
   const payload = {
     fetched_at: new Date().toISOString(),
     error,
@@ -252,8 +287,7 @@ async function setup(): Promise<void> {
   const orgId = prompt('   Organization ID (from the URL path): ')?.trim();
 
   if (!sessionKey || !orgId) {
-    console.error('Aborted — both values required.');
-    process.exit(1);
+    die('Aborted — both values required.');
   }
 
   keychainSet('session-key', sessionKey);
@@ -271,45 +305,77 @@ async function setup(): Promise<void> {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
-const args = process.argv.slice(2);
+const { values, positionals } = parse({
+  options: {
+    cache: { type: 'boolean', default: false },
+  },
+  allowPositionals: true,
+});
 
-if (args[0] === '--help' || args[0] === '-h' || args[0] === 'help') {
-  console.log(`
-claude-usage — Fetch claude.ai session and weekly usage limits
+const VERSION = '1.1.0';
 
-USAGE:
-  claude-usage [--json] [--cache]
-  claude-usage setup
-  claude-usage --help
-
-COMMANDS:
-  (default)   Display usage progress bars for all active limit buckets
-  setup       Interactively store sessionKey and orgId in macOS Keychain
-  --json      Print raw API response as JSON (for scripting)
-  --cache     Write usage snapshot to runtime/claude-usage/cache.json (for statusline poller)
-
-CREDENTIALS:
-  Stored in macOS Keychain under service "claude-usage":
-    session-key   claude.ai sessionKey cookie (~30-day validity)
-    org-id        claude.ai organization UUID
-
-  Run 'claude-usage setup' when credentials are missing or expired.
-
-CACHE FILE:
-  Written to: ~/my-project/runtime/claude-usage/cache.json
-  Read by:    your statusline script
-  Updated by: com.myproject.claude-usage-poller LaunchAgent (every 10 min)
-
-EXAMPLES:
-  claude-usage            # Check usage (human-readable)
-  claude-usage --json     # Raw JSON output
-  claude-usage --cache    # Write cache file (used by poller)
-  claude-usage setup      # First-time setup or refresh expired session
-`);
+if (values.version) {
+  console.log(VERSION);
   process.exit(0);
 }
 
-if (args[0] === 'setup') {
+if (values.help) {
+  console.log(
+    buildHelp({
+      name: 'claude-usage',
+      version: VERSION,
+      description: 'Fetch claude.ai session and weekly usage limits',
+      usage: 'claude-usage [--json] [--cache]\n  claude-usage setup\n  claude-usage --help',
+      commands: [
+        {
+          name: '(default)',
+          description: 'Display usage progress bars for all active limit buckets',
+        },
+        {
+          name: 'setup',
+          description: 'Interactively store sessionKey and orgId in macOS Keychain',
+        },
+      ],
+      options: [
+        { flags: '--json', description: 'Print raw API response as JSON (for scripting)' },
+        {
+          flags: '--cache',
+          description:
+            'Write usage snapshot to runtime/claude-usage/cache.json (for statusline poller)',
+        },
+      ],
+      examples: [
+        { command: 'claude-usage', description: 'Check usage (human-readable)' },
+        { command: 'claude-usage --json', description: 'Raw JSON output' },
+        { command: 'claude-usage --cache', description: 'Write cache file (used by poller)' },
+        {
+          command: 'claude-usage setup',
+          description: 'First-time setup or refresh expired session',
+        },
+      ],
+      sections: [
+        {
+          title: 'CREDENTIALS',
+          content:
+            '  Stored in macOS Keychain under service "claude-usage":\n' +
+            '    session-key   claude.ai sessionKey cookie (~30-day validity)\n' +
+            '    org-id        claude.ai organization UUID\n\n' +
+            "  Run 'claude-usage setup' when credentials are missing or expired.",
+        },
+        {
+          title: 'CACHE FILE',
+          content:
+            '  Written to: runtime/claude-usage/cache.json\n' +
+            '  Read by:    your statusline script\n' +
+            '  Updated by: claude-usage-poller LaunchAgent (every ~10 min)',
+        },
+      ],
+    }),
+  );
+  process.exit(0);
+}
+
+if (positionals[0] === 'setup') {
   await setup();
   process.exit(0);
 }
@@ -318,15 +384,13 @@ const sessionKey = keychainGet('session-key');
 const orgId = keychainGet('org-id');
 
 if (!sessionKey || !orgId) {
-  const msg = 'No credentials found. Run: claude-usage setup';
-  if (args.includes('--cache')) {
+  if (values.cache) {
     writeCacheError('no_credentials');
   }
-  console.error(msg);
-  process.exit(1);
+  die('No credentials found. Run: claude-usage setup');
 }
 
-const cacheMode = args.includes('--cache');
+const cacheMode = values.cache as boolean;
 
 try {
   const data = await fetchUsage(orgId, sessionKey);
@@ -334,8 +398,8 @@ try {
   if (cacheMode) {
     writeCache(data);
     console.log(`Cached to ${CACHE_PATH}`);
-  } else if (args.includes('--json')) {
-    console.log(JSON.stringify(data, null, 2));
+  } else if (values.json) {
+    outputJson(data);
   } else {
     displayUsage(data);
   }
@@ -352,10 +416,10 @@ try {
             '       → Cookies → claude.ai → copy sessionKey value'
         : `[FETCH ERROR] ${msg}`,
     );
+    process.exit(1);
   } else if (isExpired) {
-    console.error('Session expired. Run: claude-usage setup');
+    die('Session expired. Run: claude-usage setup');
   } else {
-    console.error(`Error: ${msg}`);
+    die(msg);
   }
-  process.exit(1);
 }
